@@ -2,3 +2,7 @@ node_modules/
 dist/
 .build/
 companion/.build/
+*.swp
+*.swo
+*.swn
+
