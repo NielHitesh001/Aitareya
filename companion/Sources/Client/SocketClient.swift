@@ -69,39 +69,64 @@ struct UnixSocketClient: StatusClient, ReposClient, ApprovalsClient {
         }
         payload.append("\n")
 
+        let queue = DispatchQueue(label: "ctx.socket.client.\(UUID().uuidString)")
         let connection = NWConnection(to: .unix(path: socketPath), using: .tcp)
         return try await withCheckedThrowingContinuation { continuation in
             let gate = CompletionGate<R>(continuation)
+            let bufferBox = ReceiveBuffer()
             connection.stateUpdateHandler = { state in
                 if case .failed = state {
                     gate.fail(SocketClientError.engineUnavailable)
                     connection.cancel()
                 }
             }
-            connection.start(queue: .global(qos: .userInitiated))
+            connection.start(queue: queue)
+
+            @Sendable func decodeAndFinish(_ lineData: Data) {
+                defer { connection.cancel() }
+                guard let response = try? JSONDecoder.ctx.decode(SocketResponse<R>.self, from: lineData) else {
+                    gate.fail(SocketClientError.invalidResponse)
+                    return
+                }
+                if response.ok, let result = response.result {
+                    gate.succeed(result)
+                } else if let err = response.error {
+                    gate.fail(SocketClientError.remoteError(code: err.code, message: err.message))
+                } else {
+                    gate.fail(SocketClientError.invalidResponse)
+                }
+            }
+
+            @Sendable func receiveNext() {
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, isComplete, error in
+                    if error != nil {
+                        gate.fail(SocketClientError.engineUnavailable)
+                        connection.cancel()
+                        return
+                    }
+                    if let data, !data.isEmpty {
+                        bufferBox.append(data)
+                    }
+                    if let lineData = bufferBox.takeLine() {
+                        decodeAndFinish(lineData)
+                        return
+                    }
+                    if isComplete {
+                        gate.fail(SocketClientError.invalidResponse)
+                        connection.cancel()
+                        return
+                    }
+                    receiveNext()
+                }
+            }
+
             connection.send(content: payload.data(using: .utf8), completion: .contentProcessed { error in
                 if error != nil {
                     gate.fail(SocketClientError.engineUnavailable)
                     connection.cancel()
                     return
                 }
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, _, error in
-                    defer { connection.cancel() }
-                    guard error == nil,
-                          let data,
-                          let line = String(data: data, encoding: .utf8)?.split(separator: "\n").first,
-                          let response = try? JSONDecoder.ctx.decode(SocketResponse<R>.self, from: Data(line.utf8)) else {
-                        gate.fail(SocketClientError.invalidResponse)
-                        return
-                    }
-                    if response.ok, let result = response.result {
-                        gate.succeed(result)
-                    } else if let err = response.error {
-                        gate.fail(SocketClientError.remoteError(code: err.code, message: err.message))
-                    } else {
-                        gate.fail(SocketClientError.invalidResponse)
-                    }
-                }
+                receiveNext()
             })
         }
     }
@@ -129,6 +154,22 @@ private struct SocketResponse<R: Decodable>: Decodable {
     let ok: Bool
     let result: R?
     let error: SocketErrorBody?
+}
+
+private final class ReceiveBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ chunk: Data) {
+        lock.lock(); defer { lock.unlock() }
+        data.append(chunk)
+    }
+
+    func takeLine() -> Data? {
+        lock.lock(); defer { lock.unlock() }
+        guard let newlineIndex = data.firstIndex(of: UInt8(ascii: "\n")) else { return nil }
+        return Data(data[..<newlineIndex])
+    }
 }
 
 private final class CompletionGate<T: Sendable>: @unchecked Sendable {
