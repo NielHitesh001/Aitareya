@@ -1,0 +1,26 @@
+import SwiftUI
+
+@main
+struct CtxCompanionApp: App {
+    @StateObject private var status = StatusViewModel()
+
+    var body: some Scene {
+        MenuBarExtra {
+            StatusMenuView(model: status)
+                .task { await status.refresh() }
+        } label: {
+            Image(systemName: iconName(for: status.status))
+        }
+        WindowGroup("ctx Companion Dashboard", id: "dashboard") {
+            DashboardPlaceholder(model: status)
+        }
+    }
+
+    private func iconName(for status: EngineStatus) -> String {
+        switch status.state {
+        case .healthy: "checkmark.circle.fill"
+        case .attention: "exclamationmark.circle.fill"
+        case .offline: "bolt.slash.circle.fill"
+        }
+    }
+}

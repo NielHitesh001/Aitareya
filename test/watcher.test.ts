@@ -1,0 +1,13 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import test from "node:test";
+import { watchProjects } from "../src/watcher.ts";
+import { Store } from "../src/store.ts";
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+test("coalesces changes and ignores excluded paths", async () => { const root = await mkdtemp(join(tmpdir(), "ctx-watch-")); const home = join(root, ".ctx"); await mkdir(home); await writeFile(join(root, ".gitignore"), "ignored.txt\n"); const store = new Store({ path: join(home, "index.db") }); let scans = 0; const service = await watchProjects({ projects: [root], ctxHome: home, store, debounceMs: 80, scan: async () => { scans++; return { indexed: [], skipped: [], removed: [] }; } }); await writeFile(join(root, "a.md"), "one"); await writeFile(join(root, "a.md"), "two"); await mkdir(join(root, ".git")); await writeFile(join(root, ".git/noise"), "x"); await mkdir(join(root, "node_modules")); await writeFile(join(root, "node_modules/noise"), "x"); await writeFile(join(root, "ignored.txt"), "x"); await writeFile(join(home, "noise"), "x"); await wait(250); assert.equal(scans, 1); await service.close(); store.close(); });
+test("autoSync only reports pending sync without yes", async () => { const root = await mkdtemp(join(tmpdir(), "ctx-watch-")); const home = join(root, ".ctx"); await mkdir(home); const store = new Store({ path: join(home, "index.db") }); const logs: string[] = []; const service = await watchProjects({ projects: [root], ctxHome: home, store, debounceMs: 30, autoSync: true, log: (line) => logs.push(line), scan: async () => ({ indexed: [], skipped: [], removed: [] }) }); await writeFile(join(root, "a.md"), "x"); await wait(120); assert.equal(logs.some((line) => line.includes("pending sync")), true); await service.close(); store.close(); });
+test("watch exits zero on SIGTERM", async () => { const root = await mkdtemp(join(tmpdir(), "ctx-watch-signal-")); const home = join(root, ".ctx"); await mkdir(join(root, ".git")); await mkdir(home); await writeFile(join(home, "config.json"), JSON.stringify({ projects: [root] })); const child = spawn(process.execPath, [join(process.cwd(), "src/cli.ts"), "watch"], { env: { ...process.env, CTX_HOME: home } }); await wait(500); const exit = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code))); child.kill("SIGTERM"); assert.equal(await exit, 0); });

@@ -1,0 +1,17 @@
+{
+  "name": "ctx",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/**/*.test.ts",
+    "build": "node scripts/build.mjs",
+    "api": "node src/cli.ts api serve"
+  },
+  "bin": {
+    "ctx": "bin/ctx"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2"
+  }
+}

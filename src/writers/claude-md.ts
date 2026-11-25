@@ -1,0 +1,3 @@
+import { agentsMarkdown } from "./agents-md.ts";
+import type { Store } from "../store.ts";
+export function claudeMarkdown(store: Store, project: string): string { return agentsMarkdown(store, project); }
