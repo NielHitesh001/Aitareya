@@ -657,7 +657,7 @@ async function readLastSuccessfulPoll(logPath: string): Promise<string | null> {
     const logLines = content.split(/\r?\n/).filter(Boolean);
     for (let i = logLines.length - 1; i >= 0; i -= 1) {
       const line = logLines[i];
-      if (/\baction=(pull|status)\b/.test(line) && /\boutcome=ok\b/.test(line)) {
+      if (/\baction=(pull|status)\b/.test(line) && /\boutcome=(ok\b|up to date\b|fast-forwarded\b)/.test(line)) {
         const ts = line.split(/\s+/)[0];
         if (ts) return ts;
       }

@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { defaultConfig, saveConfig } from "../src/config.ts";
-import { statusRepos } from "../src/github.ts";
+import { pullRepos, statusRepos } from "../src/github.ts";
 
 const run = promisify(execFile);
 const REAL_GIT = "/usr/bin/git";
@@ -256,6 +256,29 @@ test("dirty tracked and untracked non-.DS_Store files report dirty, while untrac
     assert.equal(res.entries[1]?.dirty, true);
     assert.equal(res.entries[2]?.dirty, false);
     assert.match(res.summary, /3 up to date, 0 behind, 0 ahead, 0 diverged, 2 dirty, 0 missing/);
+  });
+});
+
+test("pull then status reports Last successful poll timestamp instead of never", async () => {
+  await withTempHome(async (home, root) => {
+    await setupBareAndClone(home, root, "owner", "polled");
+    const configPath = join(home, ".ctx/config.json");
+    const logPath = join(home, ".ctx/logs/github.log");
+    await saveConfig(
+      { ...defaultConfig, github: { ...defaultConfig.github, repos: ["owner/polled"], cloneRoot: "~/code/github" } },
+      configPath,
+    );
+
+    const binDir = await createStubBin();
+    const env = { ...process.env, PATH: `${binDir}:${dirname(process.execPath)}` };
+    await pullRepos({ configPath, home, logPath, env });
+    const res = await statusRepos({ configPath, home, logPath, env });
+
+    assert.notEqual(res.lastSuccessfulPoll, null);
+    assert.match(res.lastSuccessfulPoll ?? "", /^\d{4}-\d{2}-\d{2}T/);
+    const pollLine = res.lines.find((line) => line.startsWith("Last successful poll:"));
+    assert.ok(pollLine);
+    assert.equal(pollLine.includes("never"), false);
   });
 });
 
