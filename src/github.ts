@@ -45,9 +45,9 @@ export type GitDoctorReport = {
 
 type ExecResult = { ok: boolean; stdout: string; stderr: string; notFound: boolean };
 
-async function runCmd(cmd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<ExecResult> {
+async function runCmd(cmd: string, args: string[], env?: NodeJS.ProcessEnv, cwd?: string): Promise<ExecResult> {
   try {
-    const { stdout, stderr } = await exec(cmd, args, { env: env ?? process.env, timeout: 10_000 });
+    const { stdout, stderr } = await exec(cmd, args, { env: env ?? process.env, cwd, timeout: 10_000 });
     return { ok: true, stdout, stderr, notFound: false };
   } catch (error: unknown) {
     const err = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string };
@@ -622,6 +622,199 @@ export async function pullRepos(options: {
     failed: outcomes.filter((o) => o.status === "failed").length,
   };
   const summary = `Summary: ${outcomes.length} checked (${counts.updated} updated, ${counts.upToDate} up to date, ${counts.diverged} diverged, ${counts.skipped} skipped, ${counts.failed} failed).`;
+  if (counts.failed === 0) {
+    await appendGithubLog(logPath, "all", "pull", "ok");
+  }
   lines.push(summary);
   return { outcomes, lines, summary };
+}
+
+export type RepoStatusState = "up_to_date" | "behind" | "ahead" | "diverged" | "missing" | "unknown";
+
+export type RepoStatusEntry = {
+  repo: string;
+  state: RepoStatusState;
+  branch: string;
+  ahead: number;
+  behind: number;
+  dirty: boolean;
+  stale: boolean;
+  lastFetch: string | null;
+  pr: string;
+  line: string;
+};
+
+export type StatusResult = {
+  entries: RepoStatusEntry[];
+  lastSuccessfulPoll: string | null;
+  lines: string[];
+  summary: string;
+};
+
+async function readLastSuccessfulPoll(logPath: string): Promise<string | null> {
+  try {
+    const content = await readFile(logPath, "utf8");
+    const logLines = content.split(/\r?\n/).filter(Boolean);
+    for (let i = logLines.length - 1; i >= 0; i -= 1) {
+      const line = logLines[i];
+      if (/\baction=(pull|status)\b/.test(line) && /\boutcome=ok\b/.test(line)) {
+        const ts = line.split(/\s+/)[0];
+        if (ts) return ts;
+      }
+    }
+    return null;
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function inspectOpenPr(
+  repoDir: string,
+  branchPrefix: string,
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
+  const res = await runCmd(
+    "gh",
+    ["pr", "list", "--head", branchPrefix, "--state", "open", "--json", "url,number,title"],
+    env,
+    repoDir,
+  );
+  if (!res.ok) return "PR unknown";
+  try {
+    const parsed = JSON.parse(res.stdout) as unknown;
+    if (!Array.isArray(parsed)) return "PR unknown";
+    if (parsed.length === 0) return "PR none";
+    const first = parsed[0] as { number?: unknown; title?: unknown; url?: unknown };
+    const num = typeof first.number === "number" ? `#${first.number}` : "";
+    const title = typeof first.title === "string" ? scrub(first.title).text : "";
+    const url = typeof first.url === "string" ? scrub(first.url).text : "";
+    return `PR ${num} ${title} (${url})`.replace(/\s+/g, " ").trim();
+  } catch {
+    return "PR unknown";
+  }
+}
+
+export async function statusRepos(options: {
+  configPath?: string;
+  home?: string;
+  logPath?: string;
+  env?: NodeJS.ProcessEnv;
+  now?: () => number;
+} = {}): Promise<StatusResult> {
+  const ctxHome = process.env.CTX_HOME ?? join(homedir(), ".ctx");
+  const configPath = options.configPath ?? process.env.CTX_CONFIG_PATH ?? join(ctxHome, "config.json");
+  const home = options.home ?? homedir();
+  const logPath = options.logPath ?? join(ctxHome, "logs", "github.log");
+  const baseEnv = options.env ?? process.env;
+  const roEnv = { ...baseEnv, GIT_OPTIONAL_LOCKS: "0" };
+  const now = options.now ?? (() => Date.now());
+
+  const config = await loadConfig(configPath);
+  const lastSuccessfulPoll = await readLastSuccessfulPoll(logPath);
+  const targets = config.github.repos.slice(0, config.github.maxReposPerRun);
+  const entries: RepoStatusEntry[] = [];
+  const lines: string[] = [];
+
+  for (const ownerRepo of targets) {
+    assertAllowedRepo(config, ownerRepo);
+    const repoDir = await resolveExistingRepoDir(config.github.cloneRoot, ownerRepo, home);
+    if (!repoDir) {
+      const line = `${ownerRepo}: missing on disk`;
+      entries.push({
+        repo: ownerRepo,
+        state: "missing",
+        branch: "-",
+        ahead: 0,
+        behind: 0,
+        dirty: false,
+        stale: true,
+        lastFetch: null,
+        pr: "PR unknown",
+        line,
+      });
+      lines.push(line);
+      continue;
+    }
+
+    let lastFetch: string | null = null;
+    let stale = false;
+    try {
+      const fetchHead = await stat(join(repoDir, ".git", "FETCH_HEAD"));
+      lastFetch = fetchHead.mtime.toISOString();
+      if (now() - fetchHead.mtimeMs > config.github.pollIntervalMinutes * 60_000) {
+        stale = true;
+      }
+    } catch {
+      stale = true;
+    }
+
+    const headBranchRes = await runCmd("git", ["--no-optional-locks", "-C", repoDir, "symbolic-ref", "--short", "HEAD"], roEnv);
+    const branch = headBranchRes.ok ? headBranchRes.stdout.trim() : "detached";
+
+    const statusRes = await runCmd("git", ["--no-optional-locks", "-C", repoDir, "status", "--porcelain", "-uall"], roEnv);
+    const dirty = statusRes.ok && statusRes.stdout.split(/\r?\n/).some((entry) => isDirtyStatusLine(entry));
+
+    const originHeadRes = await runCmd("git", ["--no-optional-locks", "-C", repoDir, "symbolic-ref", "refs/remotes/origin/HEAD"], roEnv);
+    const originRef = originHeadRes.stdout.trim();
+    const prefix = "refs/remotes/origin/";
+    let state: RepoStatusState = "unknown";
+    let ahead = 0;
+    let behind = 0;
+    let refNote = "";
+
+    if (!originHeadRes.ok || !originRef.startsWith(prefix)) {
+      stale = true;
+      refNote = "origin/HEAD unset (stale)";
+    } else {
+      const defaultBranch = originRef.slice(prefix.length);
+      const countsRes = await runCmd(
+        "git",
+        ["--no-optional-locks", "-C", repoDir, "rev-list", "--left-right", "--count", `HEAD...refs/remotes/origin/${defaultBranch}`],
+        roEnv,
+      );
+      const [aheadRaw, behindRaw] = countsRes.stdout.trim().split(/\s+/);
+      const parsedAhead = Number(aheadRaw);
+      const parsedBehind = Number(behindRaw);
+      if (!countsRes.ok || !Number.isFinite(parsedAhead) || !Number.isFinite(parsedBehind)) {
+        stale = true;
+        refNote = `origin/${defaultBranch} ref missing (stale)`;
+      } else {
+        ahead = parsedAhead;
+        behind = parsedBehind;
+        if (ahead > 0 && behind > 0) state = "diverged";
+        else if (behind > 0) state = "behind";
+        else if (ahead > 0) state = "ahead";
+        else state = "up_to_date";
+      }
+    }
+
+    const pr = await inspectOpenPr(repoDir, config.github.branchPrefix, baseEnv);
+    const stateLabel =
+      state === "up_to_date" ? "up to date"
+      : state === "behind" ? `behind ${behind}`
+      : state === "ahead" ? `ahead ${ahead}`
+      : state === "diverged" ? `diverged (ahead ${ahead}, behind ${behind})`
+      : refNote;
+    const dirtyLabel = dirty ? "dirty" : "clean";
+    const fetchLabel = lastFetch ? (stale ? `${lastFetch} (stale)` : lastFetch) : "never (stale)";
+    const line = `${ownerRepo}: branch=${branch} ${stateLabel} [${dirtyLabel}] fetch=${fetchLabel} ${pr}`;
+
+    entries.push({ repo: ownerRepo, state, branch, ahead, behind, dirty, stale, lastFetch, pr, line });
+    lines.push(line);
+  }
+
+  const counts = {
+    upToDate: entries.filter((e) => e.state === "up_to_date").length,
+    behind: entries.filter((e) => e.state === "behind").length,
+    ahead: entries.filter((e) => e.state === "ahead").length,
+    diverged: entries.filter((e) => e.state === "diverged").length,
+    dirty: entries.filter((e) => e.dirty).length,
+    missing: entries.filter((e) => e.state === "missing").length,
+  };
+  const pollLine = `Last successful poll: ${lastSuccessfulPoll ?? "never"}`;
+  const summary = `Summary: ${entries.length} checked (${counts.upToDate} up to date, ${counts.behind} behind, ${counts.ahead} ahead, ${counts.diverged} diverged, ${counts.dirty} dirty, ${counts.missing} missing).`;
+  lines.push(pollLine, summary);
+
+  return { entries, lastSuccessfulPoll, lines, summary };
 }
