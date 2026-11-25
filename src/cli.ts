@@ -17,6 +17,7 @@ import { syncFile } from "./sync.ts";
 import { watchProjects } from "./watcher.ts";
 import { startMcpServer } from "./mcp-server.ts";
 import { installDaemon, uninstallDaemon } from "./daemon.ts";
+import { loginGithub } from "./github.ts";
 
 const exec = promisify(execFile);
 const ctxHome = process.env.CTX_HOME ?? join(homedir(), ".ctx");
@@ -56,7 +57,10 @@ if (command === "api" && subcommand === "serve") {
   await serve();
 } else if (command === "daemon") {
   await daemon(subcommand);
+} else if (command === "github" && subcommand === "login") {
+  const result = await loginGithub();
+  console.log(result.message);
 } else {
-  console.error("Usage: ctx init | ctx scan [--project] | ctx search <query> | ctx sync [--dry-run|--yes] | ctx watch [--yes] | ctx serve | ctx daemon install|uninstall | ctx api serve | ctx doctor");
+  console.error("Usage: ctx init | ctx scan [--project] | ctx search <query> | ctx sync [--dry-run|--yes] | ctx watch [--yes] | ctx serve | ctx daemon install|uninstall | ctx api serve | ctx doctor | ctx github login");
   process.exitCode = 64;
 }
