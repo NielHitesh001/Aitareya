@@ -47,8 +47,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task {
             await notifications.requestPermissionIfNeeded()
             await reposViewModel.refresh()
-            await approvalsViewModel.refresh()
+            approvalsViewModel.startPolling()
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        approvalsViewModel.stopPolling()
     }
 }
 

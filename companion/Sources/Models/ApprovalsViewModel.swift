@@ -12,9 +12,27 @@ final class ApprovalsViewModel: ObservableObject {
     @Published var pendingAcceptItem: ApprovalItem?
 
     private let client: any ApprovalsClient
+    private var pollTask: Task<Void, Never>?
 
     init(client: any ApprovalsClient = UnixSocketClient()) {
         self.client = client
+    }
+
+    func startPolling(interval: Duration = .seconds(15)) {
+        pollTask?.cancel()
+        pollTask = Task { [weak self] in
+            await self?.refresh()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                if Task.isCancelled { break }
+                await self?.refresh()
+            }
+        }
+    }
+
+    func stopPolling() {
+        pollTask?.cancel()
+        pollTask = nil
     }
 
     var selectedItem: ApprovalItem? {

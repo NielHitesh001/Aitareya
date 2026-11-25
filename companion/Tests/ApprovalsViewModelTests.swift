@@ -1,5 +1,12 @@
+import Combine
 import XCTest
 @testable import CtxCompanion
+
+private final class FakeNotificationCenterForApprovals: UserNotificationCenterProtocol, @unchecked Sendable {
+    private(set) var posted: [LocalNotificationPayload] = []
+    func requestAlertAuthorization() async -> Bool { true }
+    func post(_ payload: LocalNotificationPayload) async { posted.append(payload) }
+}
 
 private final class MockApprovalsClient: ApprovalsClient, @unchecked Sendable {
     var listResult: Result<ApprovalsListResponse, Error>
@@ -113,5 +120,41 @@ final class ApprovalsViewModelTests: XCTestCase {
 
         XCTAssertEqual(model.statusMessage, "Already decided")
         XCTAssertTrue(model.items.isEmpty)
+    }
+
+    func testRefreshNewApprovalReachesProcessApprovalsAndUnchangedRefreshDoesNotRepeat() async {
+        let suite = "ctx.approvals.poll.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let center = FakeNotificationCenterForApprovals()
+        let coordinator = NotificationCoordinator(center: center, defaults: defaults)
+
+        let item = makeItem(id: "poll-1")
+        let client = MockApprovalsClient(listResult: .success(ApprovalsListResponse(approvals: [item])))
+        let model = ApprovalsViewModel(client: client)
+
+        var emitted: [[ApprovalItem]] = []
+        let cancellable = model.$items
+            .dropFirst()
+            .sink { items in
+                emitted.append(items)
+            }
+
+        await model.refresh()
+        XCTAssertEqual(emitted.count, 1)
+        for items in emitted {
+            await coordinator.processApprovals(items)
+        }
+        XCTAssertEqual(center.posted.count, 1)
+
+        emitted.removeAll()
+        await model.refresh()
+        XCTAssertEqual(emitted.count, 1)
+        for items in emitted {
+            await coordinator.processApprovals(items)
+        }
+        XCTAssertEqual(center.posted.count, 1)
+
+        cancellable.cancel()
     }
 }
