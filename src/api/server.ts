@@ -1,6 +1,13 @@
 import { chmod, lstat, mkdir, rm } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
+import {
+  acceptApproval,
+  ApprovalsStore,
+  rejectApproval,
+  type ApprovalDecisionResult,
+  type ApprovalStatus,
+} from "../approvals.ts";
 import { isValidOwnerRepo, loadConfig } from "../config.ts";
 import { assertAllowedRepo, pullRepos, statusRepos, type RepoStatusEntry } from "../github.ts";
 import {
@@ -9,6 +16,7 @@ import {
   protocolVersion,
   type ApiRequest,
   type ApiResponse,
+  type ApprovalsListResult,
   type ReposPullResult,
   type ReposStatusResult,
   type RepoSocketState,
@@ -18,11 +26,16 @@ import {
 export type StatusProvider = () => Promise<StatusResult> | StatusResult;
 export type ReposStatusProvider = () => Promise<ReposStatusResult> | ReposStatusResult;
 export type ReposPullProvider = (repo: string) => Promise<ReposPullResult> | ReposPullResult;
+export type ApprovalsListProvider = (status?: ApprovalStatus | "all") => Promise<ApprovalsListResult> | ApprovalsListResult;
+export type ApprovalsDecisionProvider = (id: string) => Promise<ApprovalDecisionResult> | ApprovalDecisionResult;
 
 export type ApiHandlers = {
   status?: StatusProvider;
   reposStatus?: ReposStatusProvider;
   reposPull?: ReposPullProvider;
+  approvalsList?: ApprovalsListProvider;
+  approvalsAccept?: ApprovalsDecisionProvider;
+  approvalsReject?: ApprovalsDecisionProvider;
 };
 
 export const defaultStatus: StatusProvider = () => ({
@@ -82,6 +95,39 @@ export function createReposPullProvider(options: Parameters<typeof pullRepos>[0]
   };
 }
 
+export function createApprovalsListProvider(approvalsPath?: string): ApprovalsListProvider {
+  return (status: ApprovalStatus | "all" = "pending") => {
+    const store = new ApprovalsStore({ path: approvalsPath });
+    try {
+      const records = store.list(status);
+      return {
+        approvals: records.map((r) => ({
+          id: r.id,
+          projectName: r.projectName,
+          targetFile: r.targetFile,
+          createdAt: r.createdAt,
+          diffText: r.diffText,
+          secretScanKinds: r.secretScanKinds,
+        })),
+      };
+    } finally {
+      store.close();
+    }
+  };
+}
+
+export function createApprovalsAcceptProvider(
+  options: Parameters<typeof acceptApproval>[1] = {},
+): ApprovalsDecisionProvider {
+  return (id: string) => acceptApproval(id, options);
+}
+
+export function createApprovalsRejectProvider(
+  options: Parameters<typeof rejectApproval>[1] = {},
+): ApprovalsDecisionProvider {
+  return (id: string) => rejectApproval(id, options);
+}
+
 function response(socket: Socket, value: ApiResponse): void {
   socket.write(`${JSON.stringify(value)}\n`);
 }
@@ -104,6 +150,17 @@ async function removeStaleSocket(socketPath: string): Promise<void> {
 
 function hasEmptyParams(params: unknown): boolean {
   return params === undefined || (typeof params === "object" && params !== null && !Array.isArray(params) && Object.keys(params).length === 0);
+}
+
+const VALID_APPROVAL_FILTERS = new Set(["pending", "accepted", "rejected", "stale", "all"]);
+
+function mapApprovalError(id: string, error: unknown): ApiResponse {
+  const message = error instanceof Error ? error.message : "Approval request failed.";
+  if (message.includes("not found")) return failure(id, "NOT_FOUND", message);
+  if (message.includes("outside") || message.includes("not in registered config.projects")) {
+    return failure(id, "NOT_ALLOWED", message);
+  }
+  return failure(id, "APPROVAL_FAILED", message);
 }
 
 async function handleLine(line: string, handlers: Required<ApiHandlers>): Promise<ApiResponse> {
@@ -144,6 +201,39 @@ async function handleLine(line: string, handlers: Required<ApiHandlers>): Promis
       return failure(id, "PULL_FAILED", message);
     }
   }
+  if (candidate.method === "approvals.list") {
+    const params = candidate.params as Record<string, unknown> | undefined;
+    if (params !== undefined && (typeof params !== "object" || params === null || Array.isArray(params))) {
+      return failure(id, "INVALID_PARAMS", "approvals.list params must be an object.");
+    }
+    const filter = params?.status;
+    if (filter !== undefined && (typeof filter !== "string" || !VALID_APPROVAL_FILTERS.has(filter))) {
+      return failure(id, "INVALID_PARAMS", "Invalid approvals.list status filter.");
+    }
+    return { v: protocolVersion, id, ok: true, result: await handlers.approvalsList((filter as ApprovalStatus | "all" | undefined) ?? "pending") };
+  }
+  if (candidate.method === "approvals.accept") {
+    const params = candidate.params as Record<string, unknown> | undefined;
+    if (!params || typeof params !== "object" || Array.isArray(params) || typeof params.id !== "string" || !params.id) {
+      return failure(id, "INVALID_PARAMS", "approvals.accept requires params.id.");
+    }
+    try {
+      return { v: protocolVersion, id, ok: true, result: await handlers.approvalsAccept(params.id) };
+    } catch (error: unknown) {
+      return mapApprovalError(id, error);
+    }
+  }
+  if (candidate.method === "approvals.reject") {
+    const params = candidate.params as Record<string, unknown> | undefined;
+    if (!params || typeof params !== "object" || Array.isArray(params) || typeof params.id !== "string" || !params.id) {
+      return failure(id, "INVALID_PARAMS", "approvals.reject requires params.id.");
+    }
+    try {
+      return { v: protocolVersion, id, ok: true, result: await handlers.approvalsReject(params.id) };
+    } catch (error: unknown) {
+      return mapApprovalError(id, error);
+    }
+  }
   return failure(id, "UNKNOWN_METHOD", "Unsupported method.");
 }
 
@@ -152,11 +242,21 @@ export async function startApiServer(
   statusOrHandlers: StatusProvider | ApiHandlers = defaultStatus,
 ): Promise<Server> {
   const handlers: Required<ApiHandlers> = typeof statusOrHandlers === "function"
-    ? { status: statusOrHandlers, reposStatus: createReposStatusProvider(), reposPull: createReposPullProvider() }
+    ? {
+        status: statusOrHandlers,
+        reposStatus: createReposStatusProvider(),
+        reposPull: createReposPullProvider(),
+        approvalsList: createApprovalsListProvider(),
+        approvalsAccept: createApprovalsAcceptProvider(),
+        approvalsReject: createApprovalsRejectProvider(),
+      }
     : {
         status: statusOrHandlers.status ?? defaultStatus,
         reposStatus: statusOrHandlers.reposStatus ?? createReposStatusProvider(),
         reposPull: statusOrHandlers.reposPull ?? createReposPullProvider(),
+        approvalsList: statusOrHandlers.approvalsList ?? createApprovalsListProvider(),
+        approvalsAccept: statusOrHandlers.approvalsAccept ?? createApprovalsAcceptProvider(),
+        approvalsReject: statusOrHandlers.approvalsReject ?? createApprovalsRejectProvider(),
       };
 
   await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });

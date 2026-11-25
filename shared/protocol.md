@@ -6,7 +6,7 @@ mode `0600`; it is never a network listener.
 
 ## Envelope
 
-Every request and response carries protocol version `1` (step 3 adds `repos.status` and `repos.pull` under version `1`; breaking changes will increment `v`):
+Every request and response carries protocol version `1` (step 3 adds `repos.status` and `repos.pull`, and step 4 adds `approvals.list`, `approvals.accept`, and `approvals.reject` under version `1`; breaking changes will increment `v`):
 
 ```json
 {"v":1,"id":"request-id","method":"status","params":{}}
@@ -101,5 +101,37 @@ newline. Messages larger than 64 KiB are rejected.
   }
 }
 ```
+
+### `approvals.list` (read-only, step 4)
+
+`params` may be omitted, `{}`, or `{"status": "pending" | "accepted" | "rejected" | "stale" | "all"}` (defaults to `"pending"`). Returns scrubbed pending/filtered approval items:
+
+```json
+{
+  "v": 1,
+  "id": "a1",
+  "ok": true,
+  "result": {
+    "approvals": [
+      {
+        "id": "uuid",
+        "projectName": "HERMES",
+        "targetFile": "AGENTS.md",
+        "createdAt": "2026-11-26T00:00:00.000Z",
+        "diffText": "--- ...",
+        "secretScanKinds": []
+      }
+    ]
+  }
+}
+```
+
+### `approvals.accept` (write, step 4)
+
+`params` must be `{"id": "<approval-id>"}`. Re-runs the sync dry-run; if the scrubbed diff hash changed, marks `stale` and refuses to write. Otherwise applies atomically via `ctx sync` and marks `accepted`. A second accept returns `status: "already_decided"` (`"already decided"`).
+
+### `approvals.reject` (write, step 4)
+
+`params` must be `{"id": "<approval-id>"}`. Marks the approval `rejected` without writing any files.
 
 Future methods are added here before either the engine or app exposes them.

@@ -1,3 +1,5 @@
+import type { ApprovalDecisionResult, ApprovalStatus } from "../approvals.ts";
+
 export const protocolVersion = 1 as const;
 export const maximumMessageBytes = 64 * 1024;
 
@@ -42,10 +44,26 @@ export type ReposPullResult = {
   line: string;
 };
 
+export type ApprovalListItem = {
+  id: string;
+  projectName: string;
+  targetFile: string;
+  createdAt: string;
+  diffText: string;
+  secretScanKinds: string[];
+};
+
+export type ApprovalsListResult = {
+  approvals: ApprovalListItem[];
+};
+
 export type ApiRequest =
   | { v: number; id: string; method: "status"; params?: Record<string, never> }
   | { v: number; id: string; method: "repos.status"; params?: Record<string, never> }
-  | { v: number; id: string; method: "repos.pull"; params: { repo: string } };
+  | { v: number; id: string; method: "repos.pull"; params: { repo: string } }
+  | { v: number; id: string; method: "approvals.list"; params?: { status?: ApprovalStatus | "all" } }
+  | { v: number; id: string; method: "approvals.accept"; params: { id: string } }
+  | { v: number; id: string; method: "approvals.reject"; params: { id: string } };
 
 export type ApiFailure = {
   v: typeof protocolVersion;
@@ -58,7 +76,7 @@ export type ApiSuccess = {
   v: typeof protocolVersion;
   id: string;
   ok: true;
-  result: StatusResult | ReposStatusResult | ReposPullResult;
+  result: StatusResult | ReposStatusResult | ReposPullResult | ApprovalsListResult | ApprovalDecisionResult;
 };
 
 export type ApiResponse = ApiFailure | ApiSuccess;
