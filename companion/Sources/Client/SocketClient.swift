@@ -10,6 +10,12 @@ protocol ReposClient: Sendable {
     func reposPull(repo: String) async throws -> RepoPullResponse
 }
 
+protocol ApprovalsClient: Sendable {
+    func approvalsList(status: String?) async throws -> ApprovalsListResponse
+    func approvalsAccept(id: String) async throws -> ApprovalDecisionResponse
+    func approvalsReject(id: String) async throws -> ApprovalDecisionResponse
+}
+
 enum SocketClientError: LocalizedError, Equatable {
     case invalidResponse
     case engineUnavailable
@@ -24,7 +30,7 @@ enum SocketClientError: LocalizedError, Equatable {
     }
 }
 
-struct UnixSocketClient: StatusClient, ReposClient {
+struct UnixSocketClient: StatusClient, ReposClient, ApprovalsClient {
     let socketPath: String
 
     init(socketPath: String = ("~/.ctx/ctx.sock" as NSString).expandingTildeInPath) {
@@ -41,6 +47,18 @@ struct UnixSocketClient: StatusClient, ReposClient {
 
     func reposPull(repo: String) async throws -> RepoPullResponse {
         try await send(method: "repos.pull", params: PullParams(repo: repo))
+    }
+
+    func approvalsList(status: String? = "pending") async throws -> ApprovalsListResponse {
+        try await send(method: "approvals.list", params: ApprovalsListParams(status: status))
+    }
+
+    func approvalsAccept(id: String) async throws -> ApprovalDecisionResponse {
+        try await send(method: "approvals.accept", params: ApprovalIdParams(id: id))
+    }
+
+    func approvalsReject(id: String) async throws -> ApprovalDecisionResponse {
+        try await send(method: "approvals.reject", params: ApprovalIdParams(id: id))
     }
 
     private func send<P: Encodable, R: Decodable & Sendable>(method: String, params: P) async throws -> R {
@@ -91,6 +109,8 @@ struct UnixSocketClient: StatusClient, ReposClient {
 
 private struct EmptyParams: Encodable {}
 private struct PullParams: Encodable { let repo: String }
+private struct ApprovalsListParams: Encodable { let status: String? }
+private struct ApprovalIdParams: Encodable { let id: String }
 
 private struct SocketRequest<P: Encodable>: Encodable {
     let v: Int

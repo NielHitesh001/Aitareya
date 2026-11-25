@@ -3,6 +3,8 @@ import SwiftUI
 
 struct ReposPillView: View {
     @ObservedObject var model: ReposViewModel
+    @ObservedObject var approvalsModel: ApprovalsViewModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Group {
@@ -59,6 +61,11 @@ struct ReposPillView: View {
                 Text(model.collapsedLabel)
                     .font(.headline)
                 Spacer()
+                Button("Approvals (\(approvalsModel.items.count))") {
+                    openWindow(id: "approvals")
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                }
+                .controlSize(.small)
                 Button {
                     Task { await model.refresh() }
                 } label: {

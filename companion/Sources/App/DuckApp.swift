@@ -4,13 +4,17 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let reposViewModel = ReposViewModel()
+    let approvalsViewModel = ApprovalsViewModel()
     private var pillController: FloatingPillController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let controller = FloatingPillController(reposModel: reposViewModel)
+        let controller = FloatingPillController(reposModel: reposViewModel, approvalsModel: approvalsViewModel)
         pillController = controller
         controller.show()
-        Task { await reposViewModel.refresh() }
+        Task {
+            await reposViewModel.refresh()
+            await approvalsViewModel.refresh()
+        }
     }
 }
 
@@ -28,6 +32,9 @@ struct CtxCompanionApp: App {
         }
         WindowGroup("ctx Companion Dashboard", id: "dashboard") {
             DashboardPlaceholder(model: status)
+        }
+        WindowGroup("ctx Approvals", id: "approvals") {
+            ApprovalsCenterView(model: appDelegate.approvalsViewModel)
         }
     }
 
