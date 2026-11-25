@@ -6,9 +6,6 @@ const exec = promisify(execFile);
 
 const DOCUMENTED_SCOPES = new Set([
   "repo",
-  "admin:public_key",
-  "gist",
-  "read:org",
   "contents:read",
   "contents:write",
   "pull_requests:read",
