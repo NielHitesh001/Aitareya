@@ -2,13 +2,21 @@
 
 ## Current state
 
-- Engine build-order steps 1–11 are implemented; the latest full suite passed
-  53 tests with `npm test`.
-- Step 12 (GitHub sync) has not started.
+- Engine build-order steps 1–11 are implemented; build fix landed at `ff94c38`,
+  and the full suite passes 54/54 tests (`npm test`).
+- Item 4 (projects registered) is complete in `~/.ctx/config.json`:
+  - `/Volumes/Niel/Assistant /HERMES`
+  - `/Volumes/Niel/Assistant /Fort`
+  - `/Volumes/Niel/Assistant /Bank_money-`
+  - `/Volumes/Niel/Assistant /Bastion`
+  - `/Volumes/Niel/Assistant /Blockhouse`
+- Launchd jobs `sh.ctx.watch` and `sh.ctx.api` are loaded and verified
+  (`runs = 1`, no exits, `~/.ctx/ctx.sock` secure).
+- Watcher verified by the HERMES probe (`scanned 26` in
+  `~/.ctx/logs/daemon.log`; probe file removed).
+- Remaining: GitHub sync (`GITHUB_SYNC.md` steps 1–7) and companion steps 3–8.
 - Companion steps 1–2 are implemented and covered by XCTest. Later companion
   phases have not started.
-- Launchd job generation is implemented and tested, but no real job has been
-  loaded.
 - Sessions remain deferred; no `SESSIONS.md` exists.
 
 ## Launchd prerequisites
