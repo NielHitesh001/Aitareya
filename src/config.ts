@@ -1,6 +1,6 @@
-import { access, readFile, realpath, stat } from "node:fs/promises";
+import { access, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { relative, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 
 export type GithubConfig = {
   enabled: boolean;
@@ -69,7 +69,11 @@ function assertNoTokens(value: unknown): void {
   }
 }
 
-function resolveCloneRoot(cloneRoot: string, home: string): string {
+export function isValidOwnerRepo(value: string): boolean {
+  return OWNER_REPO_RE.test(value) && !value.includes("..");
+}
+
+export function resolveCloneRoot(cloneRoot: string, home = homedir()): string {
   if (cloneRoot === "~") return resolve(home);
   if (cloneRoot.startsWith("~/")) return resolve(home, cloneRoot.slice(2));
   return resolve(cloneRoot);
@@ -85,7 +89,7 @@ export function parseGithubConfig(raw: unknown, home = homedir()): GithubConfig 
   const owner = g.owner ?? defaultGithubConfig.owner;
   if (typeof owner !== "string") throw new Error("github.owner must be a string.");
   const repos = g.repos ?? defaultGithubConfig.repos;
-  if (!Array.isArray(repos) || !repos.every((entry) => typeof entry === "string" && OWNER_REPO_RE.test(entry) && !entry.includes(".."))) {
+  if (!Array.isArray(repos) || !repos.every((entry) => typeof entry === "string" && isValidOwnerRepo(entry))) {
     throw new Error("github.repos must be an array of owner/repo strings.");
   }
   if (new Set(repos).size !== repos.length) throw new Error("github.repos must not contain duplicates.");
@@ -176,4 +180,9 @@ export async function loadConfig(configPath = process.env.CTX_CONFIG_PATH ?? res
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return defaultConfig;
     throw error;
   }
+}
+
+export async function saveConfig(config: CtxConfig, configPath = process.env.CTX_CONFIG_PATH ?? resolve(homedir(), ".ctx/config.json")): Promise<void> {
+  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 }

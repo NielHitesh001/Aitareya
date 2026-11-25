@@ -1,11 +1,10 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { startApiServer } from "./api/server.ts";
 import { doctor } from "./doctor.ts";
-import { defaultConfig, loadConfig, registerProject } from "./config.ts";
+import { loadConfig } from "./config.ts";
 import { scanRepository } from "./scanner.ts";
 import { Store } from "./store.ts";
 import { withinTokenBudget } from "./rank.ts";
@@ -17,15 +16,14 @@ import { syncFile } from "./sync.ts";
 import { watchProjects } from "./watcher.ts";
 import { startMcpServer } from "./mcp-server.ts";
 import { installDaemon, uninstallDaemon } from "./daemon.ts";
-import { loginGithub } from "./github.ts";
+import { allowRepo, denyRepo, discoverRepos, initRepository, loginGithub } from "./github.ts";
 
 const exec = promisify(execFile);
 const ctxHome = process.env.CTX_HOME ?? join(homedir(), ".ctx");
 const configPath = join(ctxHome, "config.json");
 const storePath = join(ctxHome, "index.db");
-async function saveConfig(config: object) { await mkdir(ctxHome, { recursive: true, mode: 0o700 }); await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 }); }
 async function currentGitRepository(): Promise<string> { try { return (await exec("git", ["rev-parse", "--show-toplevel"])).stdout.trim(); } catch { throw new Error("ctx init must be run inside a git repository."); } }
-async function init() { const repo = await currentGitRepository(); const config = await registerProject(await loadConfig(configPath), repo); await saveConfig(config); await mkdir(join(repo, "context", "decisions"), { recursive: true }); try { await readFile(join(repo, "context", "rules.md")); } catch { await writeFile(join(repo, "context", "rules.md"), "# Project rules\n"); } const store = new Store({ path: storePath }); try { await scanRepository(repo, { store }); } finally { store.close(); } }
+async function init() { await initRepository(await currentGitRepository(), { configPath, storePath }); }
 async function scan(projectOnly: boolean) { const config = await loadConfig(configPath); const projects = projectOnly ? [await currentGitRepository()] : config.projects; const store = new Store({ path: storePath }); try { for (const project of projects) await scanRepository(project, { store }); } finally { store.close(); } }
 async function search(query: string) { const store = new Store({ path: storePath }); try { const chunks = store.searchChunks(query); if (chunks[0]) await embed(chunks[0].content, { store, hash: chunks[0].id }); const results = withinTokenBudget({ fts: chunks.map(({ content, ...chunk }) => ({ ...chunk, text: content })) }); for (const result of results) console.log(`${result.project} ${result.path}:${result.startLine}-${result.endLine} [${result.sourceType}]\n${result.text}\n`); } finally { store.close(); } }
 async function syncProject(project: string, args: string[], emitDiff = true) { const store = new Store({ path: storePath }); try { const dryRun = args.includes("--dry-run"); const yes = args.includes("--yes"); const targets = [["AGENTS.md", agentsMarkdown], ["CLAUDE.md", claudeMarkdown], [".cursorrules", cursorRules]] as const; for (const [name, writer] of targets) { const result = await syncFile(join(project, name), writer(store, project), { dryRun, yes, confirm: async () => new Promise((resolve) => { process.stdout.write(`Apply ${name}? [y/N] `); process.stdin.once("data", (data) => resolve(data.toString().trim().toLowerCase() === "y")); }), log: (message) => console.error(message) }); if (emitDiff && result.diff) process.stdout.write(result.diff); } } finally { store.close(); } }
@@ -60,7 +58,16 @@ if (command === "api" && subcommand === "serve") {
 } else if (command === "github" && subcommand === "login") {
   const result = await loginGithub();
   console.log(result.message);
+} else if (command === "github" && subcommand === "discover") {
+  const result = await discoverRepos({ configPath });
+  for (const line of result.lines) console.log(line);
+} else if (command === "github" && subcommand === "allow" && process.argv[4]) {
+  const result = await allowRepo(process.argv[4], { configPath, storePath });
+  console.log(result.message);
+} else if (command === "github" && subcommand === "deny" && process.argv[4]) {
+  const result = await denyRepo(process.argv[4], { configPath });
+  console.log(result.message);
 } else {
-  console.error("Usage: ctx init | ctx scan [--project] | ctx search <query> | ctx sync [--dry-run|--yes] | ctx watch [--yes] | ctx serve | ctx daemon install|uninstall | ctx api serve | ctx doctor | ctx github login");
+  console.error("Usage: ctx init | ctx scan [--project] | ctx search <query> | ctx sync [--dry-run|--yes] | ctx watch [--yes] | ctx serve | ctx daemon install|uninstall | ctx api serve | ctx doctor | ctx github login|discover|allow|deny");
   process.exitCode = 64;
 }

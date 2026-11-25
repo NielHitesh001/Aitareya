@@ -1,6 +1,12 @@
 import { execFile, spawn } from "node:child_process";
+import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import { isValidOwnerRepo, loadConfig, registerProject, resolveCloneRoot, saveConfig, type CtxConfig } from "./config.ts";
+import { scanRepository } from "./scanner.ts";
 import { scrub } from "./scrub.ts";
+import { Store } from "./store.ts";
 
 const exec = promisify(execFile);
 
@@ -178,5 +184,197 @@ export async function loginGithub(options: { env?: NodeJS.ProcessEnv; interactiv
     scopes: verified.scopes.names,
     writeAccess,
     message: `GitHub authentication verified (scopes: ${scopeList}).${suffix}`,
+  };
+}
+
+export type DiscoverEntry = {
+  nameWithOwner: string;
+  isNew: boolean;
+  isPrivate: boolean;
+};
+
+export type DiscoverResult = {
+  entries: DiscoverEntry[];
+  privateNewCount: number;
+  lines: string[];
+};
+
+export function assertAllowedRepo(config: CtxConfig, ownerRepo: string): string {
+  if (!isValidOwnerRepo(ownerRepo)) {
+    throw new Error(`Invalid repository format "${ownerRepo}". Expected "owner/repo".`);
+  }
+  if (!config.github.repos.includes(ownerRepo)) {
+    throw new Error(`Repository "${ownerRepo}" is not in github.repos allowlist.`);
+  }
+  return ownerRepo;
+}
+
+export async function initRepository(
+  repoPath: string,
+  options: { configPath?: string; storePath?: string } = {},
+): Promise<void> {
+  const ctxHome = process.env.CTX_HOME ?? join(homedir(), ".ctx");
+  const configPath = options.configPath ?? process.env.CTX_CONFIG_PATH ?? join(ctxHome, "config.json");
+  const storePath = options.storePath ?? join(ctxHome, "index.db");
+  const config = await registerProject(await loadConfig(configPath), repoPath);
+  await saveConfig(config, configPath);
+  await mkdir(join(repoPath, "context", "decisions"), { recursive: true });
+  try {
+    await readFile(join(repoPath, "context", "rules.md"));
+  } catch {
+    await writeFile(join(repoPath, "context", "rules.md"), "# Project rules\n");
+  }
+  const store = new Store({ path: storePath });
+  try {
+    await scanRepository(repoPath, { store });
+  } finally {
+    store.close();
+  }
+}
+
+export async function discoverRepos(options: {
+  configPath?: string;
+  env?: NodeJS.ProcessEnv;
+  allowPrivateNames?: boolean;
+} = {}): Promise<DiscoverResult> {
+  const env = options.env ?? process.env;
+  const config = await loadConfig(options.configPath);
+  const result = await runCmd("gh", ["repo", "list", "--limit", "1000", "--json", "nameWithOwner"], env);
+  if (!result.ok) {
+    throw new Error(result.notFound ? "gh CLI is not installed." : "Failed to list repositories via gh.");
+  }
+
+  let rawList: unknown;
+  try {
+    rawList = JSON.parse(result.stdout);
+  } catch {
+    throw new Error("Failed to parse repository list from gh.");
+  }
+  if (!Array.isArray(rawList)) {
+    throw new Error("Unexpected repository list format from gh.");
+  }
+
+  const allowlisted = new Set(config.github.repos);
+  const entries: DiscoverEntry[] = [];
+  const lines: string[] = [];
+  let privateNewCount = 0;
+
+  for (const item of rawList) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as { nameWithOwner?: unknown; isPrivate?: unknown };
+    if (typeof record.nameWithOwner !== "string" || !isValidOwnerRepo(record.nameWithOwner)) continue;
+    const isPrivate = record.isPrivate === true;
+    const isNew = !allowlisted.has(record.nameWithOwner);
+    entries.push({ nameWithOwner: record.nameWithOwner, isNew, isPrivate });
+    if (isPrivate && !options.allowPrivateNames) {
+      if (isNew) privateNewCount += 1;
+      continue;
+    }
+    lines.push(isNew ? `${record.nameWithOwner} (new)` : `${record.nameWithOwner} (allowlisted)`);
+  }
+
+  if (privateNewCount > 0) {
+    lines.push(`${privateNewCount} private new ${privateNewCount === 1 ? "repository" : "repositories"} (names hidden).`);
+  }
+
+  return { entries, privateNewCount, lines };
+}
+
+function resolveRepoTarget(cloneRoot: string, ownerRepo: string, home = homedir()): string {
+  const root = resolveCloneRoot(cloneRoot, home);
+  const [owner, repo] = ownerRepo.split("/");
+  const target = resolve(root, owner, repo);
+  const rel = relative(root, target);
+  if (!rel || rel.startsWith("..") || rel === "..") {
+    throw new Error("Resolved repository path escapes cloneRoot.");
+  }
+  return target;
+}
+
+export async function allowRepo(
+  ownerRepo: string,
+  options: { configPath?: string; storePath?: string; home?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<{ repo: string; targetDir: string; cloned: boolean; message: string }> {
+  if (!isValidOwnerRepo(ownerRepo)) {
+    throw new Error(`Invalid repository format "${ownerRepo}". Expected "owner/repo".`);
+  }
+
+  const ctxHome = process.env.CTX_HOME ?? join(homedir(), ".ctx");
+  const configPath = options.configPath ?? process.env.CTX_CONFIG_PATH ?? join(ctxHome, "config.json");
+  const storePath = options.storePath ?? join(ctxHome, "index.db");
+  const home = options.home ?? homedir();
+  const env = options.env ?? process.env;
+
+  const current = await loadConfig(configPath);
+  const targetDir = resolveRepoTarget(current.github.cloneRoot, ownerRepo, home);
+
+  let exists = false;
+  try {
+    await stat(targetDir);
+    exists = true;
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  if (exists) {
+    const nextRepos = current.github.repos.includes(ownerRepo) ? current.github.repos : [...current.github.repos, ownerRepo];
+    await saveConfig({ ...current, github: { ...current.github, repos: nextRepos } }, configPath);
+    try {
+      await access(join(targetDir, ".git"));
+      await initRepository(targetDir, { configPath, storePath });
+    } catch {
+      // Directory exists without .git; do not re-clone or fail on init.
+    }
+    return {
+      repo: ownerRepo,
+      targetDir,
+      cloned: false,
+      message: `Target directory already exists at ${targetDir}; skipped clone.`,
+    };
+  }
+
+  await mkdir(dirname(targetDir), { recursive: true });
+  const url = `https://github.com/${ownerRepo}.git`;
+  const clone = await runCmd(
+    "git",
+    ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential", "clone", url, targetDir],
+    env,
+  );
+  if (!clone.ok) {
+    const detail = scrub(clone.stderr || clone.stdout).text.trim();
+    throw new Error(detail ? `git clone failed: ${detail}` : "git clone failed.");
+  }
+
+  const updated = await loadConfig(configPath);
+  const nextRepos = updated.github.repos.includes(ownerRepo) ? updated.github.repos : [...updated.github.repos, ownerRepo];
+  await saveConfig({ ...updated, github: { ...updated.github, repos: nextRepos } }, configPath);
+  await initRepository(targetDir, { configPath, storePath });
+
+  return {
+    repo: ownerRepo,
+    targetDir,
+    cloned: true,
+    message: `Allowed and cloned ${ownerRepo} to ${targetDir}.`,
+  };
+}
+
+export async function denyRepo(
+  ownerRepo: string,
+  options: { configPath?: string } = {},
+): Promise<{ repo: string; message: string }> {
+  if (!isValidOwnerRepo(ownerRepo)) {
+    throw new Error(`Invalid repository format "${ownerRepo}". Expected "owner/repo".`);
+  }
+  const ctxHome = process.env.CTX_HOME ?? join(homedir(), ".ctx");
+  const configPath = options.configPath ?? process.env.CTX_CONFIG_PATH ?? join(ctxHome, "config.json");
+  const config = await loadConfig(configPath);
+  assertAllowedRepo(config, ownerRepo);
+
+  const nextRepos = config.github.repos.filter((entry) => entry !== ownerRepo);
+  await saveConfig({ ...config, github: { ...config.github, repos: nextRepos } }, configPath);
+
+  return {
+    repo: ownerRepo,
+    message: `Removed ${ownerRepo} from github.repos. Local clone was not deleted.`,
   };
 }

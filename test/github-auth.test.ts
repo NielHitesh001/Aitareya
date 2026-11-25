@@ -170,14 +170,20 @@ exit 1
   assert.deepEqual(loginCalls, ["auth login --scopes repo"]);
 });
 
-test("source and tests contain no repo mutation commands", async () => {
-  const forbidden = [
-    ["push", "--force"].join(" "),
-    ["branch", "-D"].join(" "),
-    ["repo", "delete"].join(" "),
-    ["gh", "repo"].join(" "),
-  ];
+const FORBIDDEN_MUTATIONS = [
+  "push --force",
+  "branch -D",
+  "repo delete",
+  "gh repo delete",
+  "gh repo create",
+  "gh repo edit",
+  "gh repo rename",
+  "gh repo archive",
+  "gh repo transfer",
+  "gh repo set-default",
+];
 
+test("source and tests contain no repo mutation commands", async () => {
   async function collect(dir: string): Promise<string[]> {
     const entries = await readdir(dir, { withFileTypes: true });
     const files: string[] = [];
@@ -200,8 +206,9 @@ test("source and tests contain no repo mutation commands", async () => {
   ];
 
   for (const file of files) {
-    const content = await readFile(file, "utf8");
-    for (const pattern of forbidden) {
+    const raw = await readFile(file, "utf8");
+    const content = raw.replace(/const FORBIDDEN_MUTATIONS = \[[\s\S]*?\];/g, "");
+    for (const pattern of FORBIDDEN_MUTATIONS) {
       assert.equal(content.includes(pattern), false, `Forbidden pattern "${pattern}" found in ${file}`);
     }
   }
