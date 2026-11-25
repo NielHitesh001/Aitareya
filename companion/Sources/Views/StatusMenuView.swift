@@ -31,10 +31,12 @@ struct StatusMenuView: View {
 }
 
 enum EngineStarter {
+    static let apiLabel = "sh.ctx.api"
+
     static func start() {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        task.arguments = ["kickstart", "-k", "gui/\(getuid())/com.ctx.api"]
+        task.arguments = ["kickstart", "-k", "gui/\(getuid())/\(apiLabel)"]
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         try? task.run()

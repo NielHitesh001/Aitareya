@@ -26,4 +26,8 @@ final class StatusViewModelTests: XCTestCase {
         XCTAssertEqual(model.status, .offline)
         XCTAssertEqual(model.engineMessage, "Engine not running")
     }
+
+    func testEngineStarterUsesExpectedLaunchdLabel() {
+        XCTAssertEqual(EngineStarter.apiLabel, "sh.ctx.api")
+    }
 }
