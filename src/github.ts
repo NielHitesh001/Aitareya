@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
-import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, posix, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import { isValidOwnerRepo, loadConfig, registerProject, resolveCloneRoot, saveConfig, type CtxConfig } from "./config.ts";
 import { scanRepository } from "./scanner.ts";
@@ -377,4 +377,251 @@ export async function denyRepo(
     repo: ownerRepo,
     message: `Removed ${ownerRepo} from github.repos. Local clone was not deleted.`,
   };
+}
+
+const GITHUB_LOG_MAX_BYTES = 5 * 1024 * 1024;
+const GITHUB_LOG_KEEP = 3;
+
+async function rotateLogIfNeeded(logPath: string): Promise<void> {
+  try {
+    const info = await stat(logPath);
+    if (info.size < GITHUB_LOG_MAX_BYTES) return;
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  for (let idx = GITHUB_LOG_KEEP - 1; idx >= 1; idx -= 1) {
+    const src = `${logPath}.${idx}`;
+    const dst = `${logPath}.${idx + 1}`;
+    try {
+      await rename(src, dst);
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  await rename(logPath, `${logPath}.1`);
+}
+
+async function appendGithubLog(logPath: string, repo: string, action: string, outcome: string): Promise<void> {
+  await mkdir(dirname(logPath), { recursive: true, mode: 0o700 });
+  await rotateLogIfNeeded(logPath);
+  const safeRepo = scrub(repo).text;
+  const safeOutcome = scrub(outcome).text.replace(/\s+/g, " ").trim();
+  const line = `${new Date().toISOString()} repo=${safeRepo} action=${action} outcome=${safeOutcome}\n`;
+  await appendFile(logPath, line, { mode: 0o600 });
+}
+
+export function isDirtyStatusLine(line: string): boolean {
+  if (!line || line.length < 4) return false;
+  const status = line.slice(0, 2);
+  let pathPart = line.slice(3).trim();
+  if (pathPart.startsWith('"') && pathPart.endsWith('"')) {
+    pathPart = pathPart.slice(1, -1);
+  }
+  if (status === "??" && posix.basename(pathPart) === ".DS_Store") {
+    return false;
+  }
+  return true;
+}
+
+async function resolveExistingRepoDir(cloneRoot: string, ownerRepo: string, home = homedir()): Promise<string | null> {
+  const root = resolveCloneRoot(cloneRoot, home);
+  const [owner, repo] = ownerRepo.split("/");
+  const candidates = [resolve(root, owner, repo), resolve(root, repo)];
+  for (const candidate of candidates) {
+    const rel = relative(root, candidate);
+    if (!rel || rel.startsWith("..") || rel === "..") continue;
+    try {
+      const info = await stat(candidate);
+      if (!info.isDirectory()) continue;
+      await access(join(candidate, ".git"));
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+export type PullRepoOutcome = {
+  repo: string;
+  status: "updated" | "up_to_date" | "diverged" | "skipped" | "failed";
+  line: string;
+};
+
+export type PullResult = {
+  outcomes: PullRepoOutcome[];
+  lines: string[];
+  summary: string;
+};
+
+export async function pullRepos(options: {
+  configPath?: string;
+  home?: string;
+  logPath?: string;
+  env?: NodeJS.ProcessEnv;
+  sleep?: (ms: number) => Promise<void>;
+} = {}): Promise<PullResult> {
+  const ctxHome = process.env.CTX_HOME ?? join(homedir(), ".ctx");
+  const configPath = options.configPath ?? process.env.CTX_CONFIG_PATH ?? join(ctxHome, "config.json");
+  const home = options.home ?? homedir();
+  const logPath = options.logPath ?? join(ctxHome, "logs", "github.log");
+  const env = options.env ?? process.env;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolveTimer) => setTimeout(resolveTimer, ms)));
+
+  const config = await loadConfig(configPath);
+  const targets = config.github.repos.slice(0, config.github.maxReposPerRun);
+  const outcomes: PullRepoOutcome[] = [];
+  const lines: string[] = [];
+
+  for (const ownerRepo of targets) {
+    assertAllowedRepo(config, ownerRepo);
+    const repoDir = await resolveExistingRepoDir(config.github.cloneRoot, ownerRepo, home);
+    if (!repoDir) {
+      const outcome = "missing, skipped";
+      const line = `${ownerRepo}: ${outcome}`;
+      await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+      outcomes.push({ repo: ownerRepo, status: "skipped", line });
+      lines.push(line);
+      continue;
+    }
+
+    const statusRes = await runCmd("git", ["-C", repoDir, "status", "--porcelain", "-uall"], env);
+    if (!statusRes.ok) {
+      const outcome = "status failed, skipped";
+      const line = `${ownerRepo}: ${outcome}`;
+      await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+      outcomes.push({ repo: ownerRepo, status: "failed", line });
+      lines.push(line);
+      continue;
+    }
+
+    const dirtyLines = statusRes.stdout.split(/\r?\n/).filter((entry) => isDirtyStatusLine(entry));
+    if (dirtyLines.length > 0) {
+      const outcome = "dirty, skipped";
+      const line = `${ownerRepo}: ${outcome}`;
+      await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+      outcomes.push({ repo: ownerRepo, status: "skipped", line });
+      lines.push(line);
+      continue;
+    }
+
+    let fetchRes = await runCmd("git", ["-C", repoDir, "fetch", "--prune", "origin"], env);
+    if (!fetchRes.ok) {
+      await sleep(config.github.rateLimitBackoffSeconds * 1000);
+      fetchRes = await runCmd("git", ["-C", repoDir, "fetch", "--prune", "origin"], env);
+    }
+    if (!fetchRes.ok) {
+      const outcome = "fetch failed, skipped";
+      const line = `${ownerRepo}: ${outcome}`;
+      await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+      outcomes.push({ repo: ownerRepo, status: "failed", line });
+      lines.push(line);
+      continue;
+    }
+
+    const originHeadRes = await runCmd("git", ["-C", repoDir, "symbolic-ref", "refs/remotes/origin/HEAD"], env);
+    const originRef = originHeadRes.stdout.trim();
+    const prefix = "refs/remotes/origin/";
+    if (!originHeadRes.ok || !originRef.startsWith(prefix)) {
+      const outcome = "origin/HEAD unset, skipped";
+      const line = `${ownerRepo}: ${outcome}`;
+      await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+      outcomes.push({ repo: ownerRepo, status: "skipped", line });
+      lines.push(line);
+      continue;
+    }
+    const defaultBranch = originRef.slice(prefix.length);
+
+    const headBranchRes = await runCmd("git", ["-C", repoDir, "symbolic-ref", "--short", "HEAD"], env);
+    const currentBranch = headBranchRes.stdout.trim();
+    if (!headBranchRes.ok || currentBranch !== defaultBranch) {
+      const branchLabel = currentBranch || "detached";
+      const outcome = `off-default branch (${branchLabel}), skipped`;
+      const line = `${ownerRepo}: ${outcome}`;
+      await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+      outcomes.push({ repo: ownerRepo, status: "skipped", line });
+      lines.push(line);
+      continue;
+    }
+
+    const localShaRes = await runCmd("git", ["-C", repoDir, "rev-parse", "HEAD"], env);
+    const remoteShaRes = await runCmd("git", ["-C", repoDir, "rev-parse", `refs/remotes/origin/${defaultBranch}`], env);
+    if (!localShaRes.ok || !remoteShaRes.ok) {
+      const outcome = "ref lookup failed, skipped";
+      const line = `${ownerRepo}: ${outcome}`;
+      await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+      outcomes.push({ repo: ownerRepo, status: "failed", line });
+      lines.push(line);
+      continue;
+    }
+
+    const localSha = localShaRes.stdout.trim();
+    const remoteSha = remoteShaRes.stdout.trim();
+    if (localSha === remoteSha) {
+      const outcome = "up to date";
+      const line = `${ownerRepo}: ${outcome}`;
+      await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+      outcomes.push({ repo: ownerRepo, status: "up_to_date", line });
+      lines.push(line);
+      continue;
+    }
+
+    const countsRes = await runCmd(
+      "git",
+      ["-C", repoDir, "rev-list", "--left-right", "--count", `HEAD...refs/remotes/origin/${defaultBranch}`],
+      env,
+    );
+    const [aheadRaw, behindRaw] = countsRes.stdout.trim().split(/\s+/);
+    const ahead = Number(aheadRaw);
+    const behind = Number(behindRaw);
+    if (!countsRes.ok || !Number.isFinite(ahead) || !Number.isFinite(behind)) {
+      const outcome = "ahead/behind check failed, skipped";
+      const line = `${ownerRepo}: ${outcome}`;
+      await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+      outcomes.push({ repo: ownerRepo, status: "failed", line });
+      lines.push(line);
+      continue;
+    }
+
+    if (ahead === 0 && behind > 0) {
+      const mergeRes = await runCmd(
+        "git",
+        ["-C", repoDir, "merge", "--ff-only", `refs/remotes/origin/${defaultBranch}`],
+        env,
+      );
+      if (!mergeRes.ok) {
+        const outcome = "ff-merge failed, skipped";
+        const line = `${ownerRepo}: ${outcome}`;
+        await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+        outcomes.push({ repo: ownerRepo, status: "failed", line });
+        lines.push(line);
+        continue;
+      }
+      const newSha = (await runCmd("git", ["-C", repoDir, "rev-parse", "HEAD"], env)).stdout.trim();
+      const outcome = `fast-forwarded ${localSha.slice(0, 7)}..${newSha.slice(0, 7)}`;
+      const line = `${ownerRepo}: ${outcome}`;
+      await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+      outcomes.push({ repo: ownerRepo, status: "updated", line });
+      lines.push(line);
+      continue;
+    }
+
+    const outcome = "diverged";
+    const line = `${ownerRepo}: ${outcome}`;
+    await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+    outcomes.push({ repo: ownerRepo, status: "diverged", line });
+    lines.push(line);
+  }
+
+  const counts = {
+    updated: outcomes.filter((o) => o.status === "updated").length,
+    upToDate: outcomes.filter((o) => o.status === "up_to_date").length,
+    diverged: outcomes.filter((o) => o.status === "diverged").length,
+    skipped: outcomes.filter((o) => o.status === "skipped").length,
+    failed: outcomes.filter((o) => o.status === "failed").length,
+  };
+  const summary = `Summary: ${outcomes.length} checked (${counts.updated} updated, ${counts.upToDate} up to date, ${counts.diverged} diverged, ${counts.skipped} skipped, ${counts.failed} failed).`;
+  lines.push(summary);
+  return { outcomes, lines, summary };
 }

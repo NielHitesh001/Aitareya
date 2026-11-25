@@ -16,7 +16,7 @@ import { syncFile } from "./sync.ts";
 import { watchProjects } from "./watcher.ts";
 import { startMcpServer } from "./mcp-server.ts";
 import { installDaemon, uninstallDaemon } from "./daemon.ts";
-import { allowRepo, denyRepo, discoverRepos, initRepository, loginGithub } from "./github.ts";
+import { allowRepo, denyRepo, discoverRepos, initRepository, loginGithub, pullRepos } from "./github.ts";
 
 const exec = promisify(execFile);
 const ctxHome = process.env.CTX_HOME ?? join(homedir(), ".ctx");
@@ -67,7 +67,10 @@ if (command === "api" && subcommand === "serve") {
 } else if (command === "github" && subcommand === "deny" && process.argv[4]) {
   const result = await denyRepo(process.argv[4], { configPath });
   console.log(result.message);
+} else if (command === "github" && subcommand === "pull") {
+  const result = await pullRepos({ configPath });
+  for (const line of result.lines) console.log(line);
 } else {
-  console.error("Usage: ctx init | ctx scan [--project] | ctx search <query> | ctx sync [--dry-run|--yes] | ctx watch [--yes] | ctx serve | ctx daemon install|uninstall | ctx api serve | ctx doctor | ctx github login|discover|allow|deny");
+  console.error("Usage: ctx init | ctx scan [--project] | ctx search <query> | ctx sync [--dry-run|--yes] | ctx watch [--yes] | ctx serve | ctx daemon install|uninstall | ctx api serve | ctx doctor | ctx github login|discover|allow|deny|pull");
   process.exitCode = 64;
 }

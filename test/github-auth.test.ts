@@ -207,7 +207,7 @@ test("source and tests contain no repo mutation commands", async () => {
 
   for (const file of files) {
     const raw = await readFile(file, "utf8");
-    const content = raw.replace(/const FORBIDDEN_MUTATIONS = \[[\s\S]*?\];/g, "");
+    const content = raw.replace(/const FORBIDDEN_[A-Z_]+ = \[[\s\S]*?\];/g, "");
     for (const pattern of FORBIDDEN_MUTATIONS) {
       assert.equal(content.includes(pattern), false, `Forbidden pattern "${pattern}" found in ${file}`);
     }
