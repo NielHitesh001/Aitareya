@@ -461,6 +461,8 @@ export async function pullRepos(options: {
   logPath?: string;
   env?: NodeJS.ProcessEnv;
   sleep?: (ms: number) => Promise<void>;
+  repos?: string[];
+  auditAction?: string;
 } = {}): Promise<PullResult> {
   const ctxHome = process.env.CTX_HOME ?? join(homedir(), ".ctx");
   const configPath = options.configPath ?? process.env.CTX_CONFIG_PATH ?? join(ctxHome, "config.json");
@@ -468,9 +470,11 @@ export async function pullRepos(options: {
   const logPath = options.logPath ?? join(ctxHome, "logs", "github.log");
   const env = options.env ?? process.env;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolveTimer) => setTimeout(resolveTimer, ms)));
+  const auditAction = options.auditAction ?? "pull";
 
   const config = await loadConfig(configPath);
-  const targets = config.github.repos.slice(0, config.github.maxReposPerRun);
+  const requested = options.repos ?? config.github.repos;
+  const targets = requested.slice(0, config.github.maxReposPerRun);
   const outcomes: PullRepoOutcome[] = [];
   const lines: string[] = [];
 
@@ -601,7 +605,7 @@ export async function pullRepos(options: {
       const newSha = (await runCmd("git", ["-C", repoDir, "rev-parse", "HEAD"], env)).stdout.trim();
       const outcome = `fast-forwarded ${localSha.slice(0, 7)}..${newSha.slice(0, 7)}`;
       const line = `${ownerRepo}: ${outcome}`;
-      await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+      await appendGithubLog(logPath, ownerRepo, auditAction, outcome);
       outcomes.push({ repo: ownerRepo, status: "updated", line });
       lines.push(line);
       continue;
@@ -609,7 +613,7 @@ export async function pullRepos(options: {
 
     const outcome = "diverged";
     const line = `${ownerRepo}: ${outcome}`;
-    await appendGithubLog(logPath, ownerRepo, "pull", outcome);
+    await appendGithubLog(logPath, ownerRepo, auditAction, outcome);
     outcomes.push({ repo: ownerRepo, status: "diverged", line });
     lines.push(line);
   }
@@ -622,7 +626,7 @@ export async function pullRepos(options: {
     failed: outcomes.filter((o) => o.status === "failed").length,
   };
   const summary = `Summary: ${outcomes.length} checked (${counts.updated} updated, ${counts.upToDate} up to date, ${counts.diverged} diverged, ${counts.skipped} skipped, ${counts.failed} failed).`;
-  if (counts.failed === 0) {
+  if (counts.failed === 0 && !options.repos) {
     await appendGithubLog(logPath, "all", "pull", "ok");
   }
   lines.push(summary);
@@ -633,6 +637,7 @@ export type RepoStatusState = "up_to_date" | "behind" | "ahead" | "diverged" | "
 
 export type RepoStatusEntry = {
   repo: string;
+  path: string | null;
   state: RepoStatusState;
   branch: string;
   ahead: number;
@@ -641,6 +646,7 @@ export type RepoStatusEntry = {
   stale: boolean;
   lastFetch: string | null;
   pr: string;
+  prState: string;
   line: string;
 };
 
@@ -673,25 +679,28 @@ async function inspectOpenPr(
   repoDir: string,
   branchPrefix: string,
   env: NodeJS.ProcessEnv,
-): Promise<string> {
+): Promise<{ text: string; prState: string }> {
   const res = await runCmd(
     "gh",
     ["pr", "list", "--head", branchPrefix, "--state", "open", "--json", "url,number,title"],
     env,
     repoDir,
   );
-  if (!res.ok) return "PR unknown";
+  if (!res.ok) return { text: "PR unknown", prState: "unknown" };
   try {
     const parsed = JSON.parse(res.stdout) as unknown;
-    if (!Array.isArray(parsed)) return "PR unknown";
-    if (parsed.length === 0) return "PR none";
+    if (!Array.isArray(parsed)) return { text: "PR unknown", prState: "unknown" };
+    if (parsed.length === 0) return { text: "PR none", prState: "none" };
     const first = parsed[0] as { number?: unknown; title?: unknown; url?: unknown };
     const num = typeof first.number === "number" ? `#${first.number}` : "";
     const title = typeof first.title === "string" ? scrub(first.title).text : "";
     const url = typeof first.url === "string" ? scrub(first.url).text : "";
-    return `PR ${num} ${title} (${url})`.replace(/\s+/g, " ").trim();
+    return {
+      text: `PR ${num} ${title} (${url})`.replace(/\s+/g, " ").trim(),
+      prState: url || "unknown",
+    };
   } catch {
-    return "PR unknown";
+    return { text: "PR unknown", prState: "unknown" };
   }
 }
 
@@ -723,6 +732,7 @@ export async function statusRepos(options: {
       const line = `${ownerRepo}: missing on disk`;
       entries.push({
         repo: ownerRepo,
+        path: null,
         state: "missing",
         branch: "-",
         ahead: 0,
@@ -731,6 +741,7 @@ export async function statusRepos(options: {
         stale: true,
         lastFetch: null,
         pr: "PR unknown",
+        prState: "unknown",
         line,
       });
       lines.push(line);
@@ -789,7 +800,8 @@ export async function statusRepos(options: {
       }
     }
 
-    const pr = await inspectOpenPr(repoDir, config.github.branchPrefix, baseEnv);
+    const prInfo = await inspectOpenPr(repoDir, config.github.branchPrefix, baseEnv);
+    const pr = prInfo.text;
     const stateLabel =
       state === "up_to_date" ? "up to date"
       : state === "behind" ? `behind ${behind}`
@@ -800,7 +812,7 @@ export async function statusRepos(options: {
     const fetchLabel = lastFetch ? (stale ? `${lastFetch} (stale)` : lastFetch) : "never (stale)";
     const line = `${ownerRepo}: branch=${branch} ${stateLabel} [${dirtyLabel}] fetch=${fetchLabel} ${pr}`;
 
-    entries.push({ repo: ownerRepo, state, branch, ahead, behind, dirty, stale, lastFetch, pr, line });
+    entries.push({ repo: ownerRepo, path: repoDir, state, branch, ahead, behind, dirty, stale, lastFetch, pr, prState: prInfo.prState, line });
     lines.push(line);
   }
 
