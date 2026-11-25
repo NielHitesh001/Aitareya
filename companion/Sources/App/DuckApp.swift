@@ -1,17 +1,51 @@
 import AppKit
+import Combine
 import SwiftUI
+import UserNotifications
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let reposViewModel = ReposViewModel()
     let approvalsViewModel = ApprovalsViewModel()
+    let notifications = NotificationCoordinator()
+    private let notificationDelegate = NotificationDelegate()
     private var pillController: FloatingPillController?
+    private var cancellables: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let controller = FloatingPillController(reposModel: reposViewModel, approvalsModel: approvalsViewModel)
+        notificationDelegate.onOpenApprovals = { [weak self] in
+            self?.notifications.shouldOpenApprovals = true
+        }
+        UNUserNotificationCenter.current().delegate = notificationDelegate
+
+        let controller = FloatingPillController(
+            reposModel: reposViewModel,
+            approvalsModel: approvalsViewModel,
+            notificationsModel: notifications
+        )
         pillController = controller
         controller.show()
+
+        approvalsViewModel.$items
+            .dropFirst()
+            .sink { [weak self] items in
+                Task { @MainActor [weak self] in
+                    await self?.notifications.processApprovals(items)
+                }
+            }
+            .store(in: &cancellables)
+
+        Publishers.CombineLatest(reposViewModel.$isOffline, reposViewModel.$errorMessage)
+            .dropFirst()
+            .sink { [weak self] isOffline, errorMessage in
+                Task { @MainActor [weak self] in
+                    await self?.notifications.processEngineState(isOffline: isOffline, errorMessage: errorMessage)
+                }
+            }
+            .store(in: &cancellables)
+
         Task {
+            await notifications.requestPermissionIfNeeded()
             await reposViewModel.refresh()
             await approvalsViewModel.refresh()
         }

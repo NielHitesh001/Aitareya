@@ -4,6 +4,7 @@ import SwiftUI
 struct ReposPillView: View {
     @ObservedObject var model: ReposViewModel
     @ObservedObject var approvalsModel: ApprovalsViewModel
+    @ObservedObject var notifications: NotificationCoordinator
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -13,6 +14,12 @@ struct ReposPillView: View {
             } else {
                 collapsedView
             }
+        }
+        .onChange(of: notifications.shouldOpenApprovals) { _, shouldOpen in
+            guard shouldOpen else { return }
+            notifications.shouldOpenApprovals = false
+            openWindow(id: "approvals")
+            NSApplication.shared.activate(ignoringOtherApps: true)
         }
         .confirmationDialog(
             "Pull \(model.pendingPullRepo?.name ?? "repository")?",
@@ -118,9 +125,27 @@ struct ReposPillView: View {
                     }
                 }
             }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                if notifications.permissionDenied {
+                    Text("Notifications denied in System Settings.")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+                HStack(spacing: 12) {
+                    Toggle("Notify approvals", isOn: $notifications.approvalsEnabled)
+                        .toggleStyle(.checkbox)
+                        .font(.caption2)
+                    Toggle("Notify engine errors", isOn: $notifications.engineErrorsEnabled)
+                        .toggleStyle(.checkbox)
+                        .font(.caption2)
+                }
+            }
         }
         .padding(14)
-        .frame(width: 480, height: 360)
+        .frame(width: 480, height: 410)
         .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.primary.opacity(0.14), lineWidth: 1))
     }

@@ -14,9 +14,9 @@ final class FloatingPillController {
     private var expandCancellable: AnyCancellable?
 
     private static let collapsedSize = NSSize(width: 136, height: 36)
-    private static let expandedSize = NSSize(width: 480, height: 360)
+    private static let expandedSize = NSSize(width: 480, height: 410)
 
-    init(reposModel: ReposViewModel, approvalsModel: ApprovalsViewModel) {
+    init(reposModel: ReposViewModel, approvalsModel: ApprovalsViewModel, notificationsModel: NotificationCoordinator) {
         let initialSize = Self.collapsedSize
         let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: initialSize),
@@ -31,7 +31,9 @@ final class FloatingPillController {
         panel.isOpaque = false
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
-        panel.contentView = NSHostingView(rootView: ReposPillView(model: reposModel, approvalsModel: approvalsModel))
+        panel.contentView = NSHostingView(
+            rootView: ReposPillView(model: reposModel, approvalsModel: approvalsModel, notifications: notificationsModel)
+        )
 
         self.panel = panel
         restorePosition(size: initialSize)
