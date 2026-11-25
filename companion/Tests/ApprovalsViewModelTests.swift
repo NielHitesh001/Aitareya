@@ -128,6 +128,7 @@ final class ApprovalsViewModelTests: XCTestCase {
         defaults.removePersistentDomain(forName: suite)
         let center = FakeNotificationCenterForApprovals()
         let coordinator = NotificationCoordinator(center: center, defaults: defaults)
+        await coordinator.processApprovals([])
 
         let item = makeItem(id: "poll-1")
         let client = MockApprovalsClient(listResult: .success(ApprovalsListResponse(approvals: [item])))

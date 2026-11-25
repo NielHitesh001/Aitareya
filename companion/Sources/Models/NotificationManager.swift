@@ -78,6 +78,7 @@ final class NotificationCoordinator: ObservableObject {
     private let center: any UserNotificationCenterProtocol
     private let defaults: UserDefaults
     private var seenApprovalIds: Set<String>
+    private var needsFirstLaunchSeed: Bool
     private var wasInErrorState = false
 
     init(
@@ -96,6 +97,7 @@ final class NotificationCoordinator: ObservableObject {
         } else {
             self.engineErrorsEnabled = true
         }
+        self.needsFirstLaunchSeed = defaults.object(forKey: DefaultsKey.seenApprovalIds) == nil
         let stored = defaults.stringArray(forKey: DefaultsKey.seenApprovalIds) ?? []
         self.seenApprovalIds = Set(stored)
     }
@@ -106,6 +108,15 @@ final class NotificationCoordinator: ObservableObject {
     }
 
     func processApprovals(_ items: [ApprovalItem]) async {
+        if needsFirstLaunchSeed {
+            needsFirstLaunchSeed = false
+            for item in items {
+                seenApprovalIds.insert(item.id)
+            }
+            defaults.set(Array(seenApprovalIds).sorted(), forKey: DefaultsKey.seenApprovalIds)
+            return
+        }
+
         let newItems = items.filter { !seenApprovalIds.contains($0.id) }
         guard !newItems.isEmpty else { return }
 

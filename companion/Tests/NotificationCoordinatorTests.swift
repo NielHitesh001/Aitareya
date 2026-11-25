@@ -39,6 +39,7 @@ final class NotificationCoordinatorTests: XCTestCase {
         let center1 = FakeNotificationCenter()
         let coord1 = NotificationCoordinator(center: center1, defaults: defaults)
 
+        await coord1.processApprovals([])
         await coord1.processApprovals([makeItem(id: "id-1")])
         await coord1.processApprovals([makeItem(id: "id-1")])
         XCTAssertEqual(center1.posted.count, 1)
@@ -73,6 +74,7 @@ final class NotificationCoordinatorTests: XCTestCase {
         coord.approvalsEnabled = false
         coord.engineErrorsEnabled = false
 
+        await coord.processApprovals([])
         await coord.processApprovals([makeItem(id: "id-suppressed")])
         await coord.processEngineState(isOffline: true, errorMessage: "Engine not running")
         XCTAssertTrue(center.posted.isEmpty)
@@ -86,5 +88,40 @@ final class NotificationCoordinatorTests: XCTestCase {
 
         await coord.requestPermissionIfNeeded()
         XCTAssertTrue(coord.permissionDenied)
+    }
+
+    func testFirstLaunchWithoutSeenKeySeedsThreeApprovalsWithoutNotifying() async {
+        let defaults = makeDefaults()
+        let center = FakeNotificationCenter()
+        let coord = NotificationCoordinator(center: center, defaults: defaults)
+
+        await coord.processApprovals([makeItem(id: "a1"), makeItem(id: "a2"), makeItem(id: "a3")])
+
+        XCTAssertTrue(center.posted.isEmpty)
+        XCTAssertEqual(defaults.stringArray(forKey: "ctx.notifications.seenApprovalIds"), ["a1", "a2", "a3"])
+    }
+
+    func testAfterFirstLaunchSeedingFourthApprovalPostsOneNotification() async {
+        let defaults = makeDefaults()
+        let center = FakeNotificationCenter()
+        let coord = NotificationCoordinator(center: center, defaults: defaults)
+
+        await coord.processApprovals([makeItem(id: "a1"), makeItem(id: "a2"), makeItem(id: "a3")])
+        XCTAssertTrue(center.posted.isEmpty)
+
+        await coord.processApprovals([makeItem(id: "a1"), makeItem(id: "a2"), makeItem(id: "a3"), makeItem(id: "a4")])
+        XCTAssertEqual(center.posted.count, 1)
+        XCTAssertEqual(center.posted.first?.identifier, "approval-a4")
+    }
+
+    func testExistingStoredSeenKeyNotifiesUnseenApproval() async {
+        let defaults = makeDefaults()
+        defaults.set(["a1"], forKey: "ctx.notifications.seenApprovalIds")
+        let center = FakeNotificationCenter()
+        let coord = NotificationCoordinator(center: center, defaults: defaults)
+
+        await coord.processApprovals([makeItem(id: "a1"), makeItem(id: "a2")])
+        XCTAssertEqual(center.posted.count, 1)
+        XCTAssertEqual(center.posted.first?.identifier, "approval-a2")
     }
 }
