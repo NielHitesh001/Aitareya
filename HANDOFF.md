@@ -16,6 +16,7 @@
   `~/.ctx/logs/daemon.log`; probe file removed).
 - Remaining: GitHub sync (`GITHUB_SYNC.md` steps 1–7) and companion steps 3–8.
 - `GITHUB_SYNC.md` is in place (`da37c5f`); GitHub sync implementation has not started.
+- Classic gh token carries admin:public_key, gist, read:org. Doctor warns. Replace with a fine-grained token scoped to the five repos to clear the warning.
 - Companion steps 1–2 are implemented and covered by XCTest. Later companion
   phases have not started.
 - Sessions remain deferred; no `SESSIONS.md` exists.

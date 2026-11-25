@@ -95,6 +95,27 @@ exit 1
   assert.equal(JSON.stringify(report).includes(FAKE_TOKEN), false);
 });
 
+test("doctor warns on classic extra scopes admin:public_key, gist, and read:org", async () => {
+  const binDir = await makeStubBin(`
+if [ "$1" = "--version" ]; then echo "gh version 2.100.0"; exit 0; fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "github.com"
+  echo "  - Token: ${FAKE_TOKEN}"
+  echo "  - Token scopes: 'repo', 'admin:public_key', 'gist', 'read:org'"
+  exit 0
+fi
+exit 1
+`);
+  const report = await doctor(async () => defaultConfig, "/path/that/does/not/exist", { env: envWithPath(binDir) });
+  assert.equal(report.github.ghInstalled, "pass");
+  assert.equal(report.github.authenticated, "pass");
+  assert.equal(report.github.scopes.status, "warn");
+  assert.deepEqual(report.github.scopes.broad, ["admin:public_key", "gist", "read:org"]);
+  assert.match(report.github.scopes.message ?? "", /admin:public_key, gist, read:org/);
+  assert.equal(report.github.scopes.writeAccess, true);
+  assert.equal(JSON.stringify(report).includes(FAKE_TOKEN), false);
+});
+
 test("doctor warns when token lacks write access", async () => {
   const binDir = await makeStubBin(`
 if [ "$1" = "--version" ]; then echo "gh version 2.100.0"; exit 0; fi
